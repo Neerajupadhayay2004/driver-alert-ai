@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { Header } from '@/components/Header';
 import { WebcamFeed } from '@/components/WebcamFeed';
@@ -6,6 +6,8 @@ import { MetricsPanel } from '@/components/MetricsPanel';
 import { AlertSystem } from '@/components/AlertSystem';
 import { Head3DViewer } from '@/components/Head3DViewer';
 import { TrendChart, AlertTimeline } from '@/components/TrendChart';
+import { AIAnalysisPanel } from '@/components/AIAnalysisPanel';
+import { useFatigueAnalysis } from '@/hooks/useFatigueAnalysis';
 import type { FatigueMetrics, AlertLevel, FatigueHistory } from '@/types/fatigue';
 
 const defaultMetrics: FatigueMetrics = {
@@ -25,9 +27,15 @@ const Index = () => {
   const [metrics, setMetrics] = useState<FatigueMetrics>(defaultMetrics);
   const [alertLevel, setAlertLevel] = useState<AlertLevel>('alert');
   const [history, setHistory] = useState<FatigueHistory[]>([]);
+  const [isMonitoring, setIsMonitoring] = useState(false);
+  
+  const { analysis, isAnalyzing, error: analysisError, analyzeMetrics, clearAnalysis } = useFatigueAnalysis();
 
   const handleMetricsUpdate = useCallback((newMetrics: FatigueMetrics) => {
     setMetrics(newMetrics);
+    if (newMetrics.faceDetected) {
+      setIsMonitoring(true);
+    }
   }, []);
 
   const handleAlertLevelChange = useCallback((level: AlertLevel) => {
@@ -37,6 +45,19 @@ const Index = () => {
   const handleHistoryUpdate = useCallback((newHistory: FatigueHistory[]) => {
     setHistory(newHistory);
   }, []);
+
+  // Trigger AI analysis periodically when monitoring
+  useEffect(() => {
+    if (isMonitoring && metrics.faceDetected) {
+      analyzeMetrics(metrics, alertLevel);
+    }
+  }, [isMonitoring, metrics.faceDetected, history.length, analyzeMetrics, metrics, alertLevel]);
+
+  const handleRefreshAnalysis = useCallback(() => {
+    if (metrics.faceDetected) {
+      analyzeMetrics(metrics, alertLevel);
+    }
+  }, [metrics, alertLevel, analyzeMetrics]);
 
   return (
     <div className="min-h-screen bg-background grid-pattern">
@@ -113,6 +134,20 @@ const Index = () => {
                 <AlertTimeline data={history} />
               </motion.div>
             </div>
+
+            {/* AI Analysis Panel */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.5 }}
+            >
+              <AIAnalysisPanel
+                analysis={analysis}
+                isAnalyzing={isAnalyzing}
+                error={analysisError}
+                onRefresh={handleRefreshAnalysis}
+              />
+            </motion.div>
           </div>
 
           {/* Right column - Metrics panel */}

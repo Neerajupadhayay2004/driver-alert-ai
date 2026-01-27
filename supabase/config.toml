@@ -1,1 +1,6 @@
 project_id = "epgyxyqrrrhobudnlgam"
+
+[functions]
+
+[functions.analyze-fatigue]
+verify_jwt = false

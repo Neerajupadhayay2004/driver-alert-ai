@@ -7,6 +7,7 @@ import { AlertSystem } from '@/components/AlertSystem';
 import { Head3DViewer } from '@/components/Head3DViewer';
 import { TrendChart, AlertTimeline } from '@/components/TrendChart';
 import { AIAnalysisPanel } from '@/components/AIAnalysisPanel';
+import { VisionIndicators } from '@/components/VisionIndicators';
 import { useFatigueAnalysis } from '@/hooks/useFatigueAnalysis';
 import type { FatigueMetrics, AlertLevel, FatigueHistory } from '@/types/fatigue';
 
@@ -136,6 +137,18 @@ const Index = () => {
                 <AlertTimeline data={history} />
               </motion.div>
             </div>
+
+            {/* Vision-Based Indicators Panel */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.45 }}
+            >
+              <h2 className="text-xs sm:text-sm font-medium text-muted-foreground mb-2 sm:mb-3 uppercase tracking-wider">
+                Vision-Based Indicators
+              </h2>
+              <VisionIndicators metrics={metrics} />
+            </motion.div>
 
             {/* AI Analysis Panel */}
             <motion.div

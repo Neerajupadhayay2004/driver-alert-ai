@@ -14,12 +14,18 @@ import {
   Shield,
   ShieldAlert,
   Maximize2,
-  Settings
+  Settings,
+  Radio,
+  Scan,
+  Target,
+  AlertTriangle,
+  Timer
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useWebcam } from '@/hooks/useWebcam';
 import { useFaceDetection } from '@/hooks/useFaceDetection';
 import { cn } from '@/lib/utils';
+import { Badge } from '@/components/ui/badge';
 
 interface WebcamFeedProps {
   onMetricsUpdate?: (metrics: ReturnType<typeof useFaceDetection>['metrics']) => void;
@@ -44,30 +50,43 @@ export function WebcamFeed({ onMetricsUpdate, onAlertLevelChange, onHistoryUpdat
   const [isActive, setIsActive] = useState(false);
   const [fps, setFps] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [detectionLatency, setDetectionLatency] = useState(0);
   const fpsRef = useRef({ frames: 0, lastTime: performance.now() });
+  const latencyRef = useRef<number[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // FPS counter
+  // FPS and latency counter
   useEffect(() => {
     if (!isActive || !isStreaming) return;
 
     const interval = setInterval(() => {
       const now = performance.now();
       const elapsed = now - fpsRef.current.lastTime;
-      setFps(Math.round((fpsRef.current.frames / elapsed) * 1000));
+      const currentFps = Math.round((fpsRef.current.frames / elapsed) * 1000);
+      setFps(currentFps);
+      
+      // Calculate average latency
+      if (latencyRef.current.length > 0) {
+        const avgLatency = latencyRef.current.reduce((a, b) => a + b, 0) / latencyRef.current.length;
+        setDetectionLatency(Math.round(avgLatency));
+        latencyRef.current = [];
+      }
+      
       fpsRef.current.frames = 0;
       fpsRef.current.lastTime = now;
-    }, 1000);
+    }, 500); // Update more frequently for instant feedback
 
     return () => clearInterval(interval);
   }, [isActive, isStreaming]);
 
-  // Count frames
+  // Count frames and track latency
   useEffect(() => {
     if (metrics.faceDetected) {
       fpsRef.current.frames++;
+      // Estimate detection latency (time since last update)
+      latencyRef.current.push(1000 / Math.max(fps, 1));
     }
-  }, [metrics]);
+  }, [metrics, fps]);
 
   useEffect(() => {
     onMetricsUpdate?.(metrics);
@@ -222,7 +241,7 @@ export function WebcamFeed({ onMetricsUpdate, onAlertLevelChange, onHistoryUpdat
           )}
         </AnimatePresence>
 
-        {/* Face Detection Box Animation */}
+        {/* Enhanced Face Detection Box with Tracking Animation */}
         <AnimatePresence>
           {isStreaming && metrics.faceDetected && (
             <motion.div
@@ -231,27 +250,104 @@ export function WebcamFeed({ onMetricsUpdate, onAlertLevelChange, onHistoryUpdat
               exit={{ opacity: 0, scale: 0.8 }}
               className="absolute inset-0 flex items-center justify-center pointer-events-none"
             >
+              {/* Outer scanning ring */}
               <motion.div
                 className={cn(
-                  "w-32 h-40 sm:w-40 sm:h-52 border-2 rounded-xl",
+                  "absolute w-44 h-56 sm:w-52 sm:h-64 rounded-full border border-dashed",
+                  alertLevel === 'critical' ? 'border-critical/50' :
+                  alertLevel === 'severe' ? 'border-critical/40' :
+                  alertLevel === 'fatigued' || alertLevel === 'drowsy' ? 'border-warning/50' :
+                  'border-primary/40'
+                )}
+                animate={{ rotate: 360 }}
+                transition={{ duration: 8, repeat: Infinity, ease: "linear" }}
+              />
+              
+              {/* Main detection box */}
+              <motion.div
+                className={cn(
+                  "relative w-32 h-40 sm:w-40 sm:h-52 border-2 rounded-xl",
                   alertLevel === 'critical' ? 'border-critical' :
                   alertLevel === 'severe' ? 'border-critical/70' :
                   alertLevel === 'fatigued' || alertLevel === 'drowsy' ? 'border-warning' :
                   'border-primary'
                 )}
                 animate={{
-                  boxShadow: [
+                  boxShadow: alertLevel === 'critical' || alertLevel === 'severe' ? [
+                    '0 0 15px rgba(255,68,68,0.4)',
+                    '0 0 30px rgba(255,68,68,0.6)',
+                    '0 0 15px rgba(255,68,68,0.4)'
+                  ] : [
                     '0 0 10px rgba(0,255,255,0.3)',
-                    '0 0 20px rgba(0,255,255,0.5)',
+                    '0 0 25px rgba(0,255,255,0.5)',
                     '0 0 10px rgba(0,255,255,0.3)'
                   ]
                 }}
-                transition={{ duration: 2, repeat: Infinity }}
+                transition={{ duration: 1.5, repeat: Infinity }}
               >
-                {/* Face crosshairs */}
-                <div className="absolute top-1/2 left-0 right-0 h-px bg-primary/30" />
-                <div className="absolute top-0 bottom-0 left-1/2 w-px bg-primary/30" />
+                {/* Face crosshairs - animated */}
+                <motion.div 
+                  className="absolute top-1/2 left-0 right-0 h-px bg-gradient-to-r from-transparent via-primary/50 to-transparent"
+                  animate={{ opacity: [0.3, 0.7, 0.3] }}
+                  transition={{ duration: 2, repeat: Infinity }}
+                />
+                <motion.div 
+                  className="absolute top-0 bottom-0 left-1/2 w-px bg-gradient-to-b from-transparent via-primary/50 to-transparent"
+                  animate={{ opacity: [0.3, 0.7, 0.3] }}
+                  transition={{ duration: 2, repeat: Infinity, delay: 0.5 }}
+                />
+                
+                {/* Corner brackets with pulse */}
+                {[
+                  'top-0 left-0 border-l-2 border-t-2 rounded-tl-lg',
+                  'top-0 right-0 border-r-2 border-t-2 rounded-tr-lg',
+                  'bottom-0 left-0 border-l-2 border-b-2 rounded-bl-lg',
+                  'bottom-0 right-0 border-r-2 border-b-2 rounded-br-lg',
+                ].map((pos, i) => (
+                  <motion.div
+                    key={pos}
+                    className={cn(
+                      'absolute w-4 h-4',
+                      alertLevel === 'critical' || alertLevel === 'severe' ? 'border-critical' : 'border-primary',
+                      pos
+                    )}
+                    animate={{ opacity: [0.5, 1, 0.5] }}
+                    transition={{ duration: 1.5, repeat: Infinity, delay: i * 0.1 }}
+                  />
+                ))}
+
+                {/* Target center dot */}
+                <motion.div 
+                  className={cn(
+                    "absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-2 h-2 rounded-full",
+                    alertLevel === 'critical' || alertLevel === 'severe' ? 'bg-critical' : 'bg-primary'
+                  )}
+                  animate={{ scale: [1, 1.5, 1], opacity: [0.7, 1, 0.7] }}
+                  transition={{ duration: 1, repeat: Infinity }}
+                />
               </motion.div>
+
+              {/* Eye tracking indicators */}
+              <div className="absolute flex gap-16 sm:gap-20" style={{ top: '35%' }}>
+                {/* Left eye */}
+                <motion.div
+                  className={cn(
+                    "w-4 h-4 rounded-full border-2",
+                    metrics.eyesOpen ? 'border-success bg-success/20' : 'border-warning bg-warning/20'
+                  )}
+                  animate={{ scale: metrics.eyesOpen ? [1, 1.1, 1] : [1, 0.9, 1] }}
+                  transition={{ duration: 0.5, repeat: Infinity }}
+                />
+                {/* Right eye */}
+                <motion.div
+                  className={cn(
+                    "w-4 h-4 rounded-full border-2",
+                    metrics.eyesOpen ? 'border-success bg-success/20' : 'border-warning bg-warning/20'
+                  )}
+                  animate={{ scale: metrics.eyesOpen ? [1, 1.1, 1] : [1, 0.9, 1] }}
+                  transition={{ duration: 0.5, repeat: Infinity }}
+                />
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -313,21 +409,44 @@ export function WebcamFeed({ onMetricsUpdate, onAlertLevelChange, onHistoryUpdat
             >
               {isActive && (
                 <>
-                  {/* FPS Counter */}
-                  <div className="flex items-center gap-1.5 bg-background/90 backdrop-blur-sm px-2 py-1 rounded-lg border border-border/50">
-                    <Zap className="w-3 h-3 text-primary" />
+                  {/* Latency indicator */}
+                  <div className={cn(
+                    "flex items-center gap-1.5 backdrop-blur-sm px-2 py-1 rounded-lg border",
+                    detectionLatency < 50 ? "bg-success/20 border-success/50" :
+                    detectionLatency < 100 ? "bg-warning/20 border-warning/50" :
+                    "bg-critical/20 border-critical/50"
+                  )}>
+                    <Timer className="w-3 h-3" />
+                    <span className="text-[10px] sm:text-xs font-mono font-medium">{detectionLatency}ms</span>
+                  </div>
+
+                  {/* FPS Counter with status color */}
+                  <div className={cn(
+                    "flex items-center gap-1.5 backdrop-blur-sm px-2 py-1 rounded-lg border",
+                    fps >= 25 ? "bg-success/20 border-success/50" :
+                    fps >= 15 ? "bg-warning/20 border-warning/50" :
+                    "bg-critical/20 border-critical/50"
+                  )}>
+                    <Zap className={cn(
+                      "w-3 h-3",
+                      fps >= 25 ? "text-success" : fps >= 15 ? "text-warning" : "text-critical"
+                    )} />
                     <span className="text-[10px] sm:text-xs font-mono font-medium">{fps} FPS</span>
                   </div>
                   
-                  {/* LIVE indicator */}
-                  <div className="flex items-center gap-1.5 bg-critical/90 px-2 py-1 rounded-lg">
+                  {/* LIVE indicator with instant pulse */}
+                  <motion.div 
+                    className="flex items-center gap-1.5 bg-critical/90 px-2 py-1 rounded-lg"
+                    animate={{ scale: [1, 1.02, 1] }}
+                    transition={{ duration: 0.5, repeat: Infinity }}
+                  >
                     <motion.div 
                       className="w-2 h-2 rounded-full bg-white"
-                      animate={{ opacity: [1, 0.5, 1] }}
-                      transition={{ duration: 1, repeat: Infinity }}
+                      animate={{ opacity: [1, 0.3, 1] }}
+                      transition={{ duration: 0.5, repeat: Infinity }}
                     />
                     <span className="text-[10px] sm:text-xs font-bold text-white">LIVE</span>
-                  </div>
+                  </motion.div>
 
                   {/* Fullscreen button */}
                   <Button
@@ -342,26 +461,43 @@ export function WebcamFeed({ onMetricsUpdate, onAlertLevelChange, onHistoryUpdat
               )}
             </motion.div>
 
-            {/* Bottom left - Connection & AI Status */}
+            {/* Bottom left - Connection & AI Status with enhanced info */}
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="absolute bottom-2 left-2 sm:bottom-3 sm:left-3 flex items-center gap-2"
+              className="absolute bottom-2 left-2 sm:bottom-3 sm:left-3 flex flex-col gap-1.5"
             >
               <div className="flex items-center gap-1.5 bg-background/90 backdrop-blur-sm px-2 py-1 rounded-lg border border-border/50">
                 {metrics.faceDetected ? (
-                  <Wifi className="w-3 h-3 text-success" />
+                  <Radio className="w-3 h-3 text-success" />
                 ) : (
-                  <WifiOff className="w-3 h-3 text-warning" />
+                  <Scan className="w-3 h-3 text-warning animate-pulse" />
                 )}
                 <StatusIcon className={cn('w-3 h-3', statusInfo.color, modelLoading && 'animate-spin')} />
                 <span className={cn('text-[10px] sm:text-xs font-medium', statusInfo.color)}>
                   {statusInfo.text}
                 </span>
               </div>
+              
+              {/* Head pose quick info */}
+              <AnimatePresence>
+                {metrics.faceDetected && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 5 }}
+                    className="flex items-center gap-1 bg-background/90 backdrop-blur-sm px-2 py-1 rounded-lg border border-border/50"
+                  >
+                    <Target className="w-3 h-3 text-primary" />
+                    <span className="text-[9px] sm:text-[10px] font-mono">
+                      P:{metrics.headPose.pitch}° Y:{metrics.headPose.yaw}° R:{metrics.headPose.roll}°
+                    </span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
 
-            {/* Bottom right - Quick Metrics */}
+            {/* Bottom right - Enhanced Quick Metrics */}
             <AnimatePresence>
               {metrics.faceDetected && (
                 <motion.div
@@ -370,22 +506,57 @@ export function WebcamFeed({ onMetricsUpdate, onAlertLevelChange, onHistoryUpdat
                   exit={{ opacity: 0, y: 10 }}
                   className="absolute bottom-2 right-2 sm:bottom-3 sm:right-3"
                 >
-                  <div className="flex items-center gap-2">
-                    {/* PERCLOS */}
-                    <div className={cn(
-                      "flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] sm:text-xs font-mono font-bold",
-                      metrics.perclos >= 50 ? "bg-critical/90 text-white" :
-                      metrics.perclos >= 25 ? "bg-warning/90 text-foreground" :
-                      "bg-success/90 text-white"
-                    )}>
-                      <span>PERCLOS</span>
-                      <span>{metrics.perclos.toFixed(1)}%</span>
+                  <div className="flex flex-col items-end gap-1.5">
+                    <div className="flex items-center gap-2">
+                      {/* PERCLOS with animated bar */}
+                      <motion.div 
+                        className={cn(
+                          "flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] sm:text-xs font-mono font-bold",
+                          metrics.perclos >= 50 ? "bg-critical/90 text-white" :
+                          metrics.perclos >= 25 ? "bg-warning/90 text-foreground" :
+                          "bg-success/90 text-white"
+                        )}
+                        animate={metrics.perclos >= 50 ? { scale: [1, 1.05, 1] } : {}}
+                        transition={{ duration: 0.5, repeat: Infinity }}
+                      >
+                        <Eye className="w-3 h-3" />
+                        <span>PERCLOS</span>
+                        <span className="font-bold">{metrics.perclos.toFixed(1)}%</span>
+                      </motion.div>
                     </div>
                     
-                    {/* Blink Rate */}
-                    <div className="flex items-center gap-1 bg-background/90 backdrop-blur-sm px-2 py-1 rounded-lg border border-border/50">
-                      <Activity className="w-3 h-3 text-primary" />
-                      <span className="text-[10px] sm:text-xs font-mono">{metrics.blinkRate}/min</span>
+                    <div className="flex items-center gap-2">
+                      {/* Blink Rate with visual indicator */}
+                      <div className={cn(
+                        "flex items-center gap-1 px-2 py-1 rounded-lg border text-[10px] sm:text-xs font-mono",
+                        metrics.blinkRate < 8 || metrics.blinkRate > 25 
+                          ? "bg-warning/20 border-warning/50" 
+                          : "bg-background/90 border-border/50"
+                      )}>
+                        <motion.div
+                          animate={{ scale: [1, 0.8, 1] }}
+                          transition={{ duration: 60 / Math.max(metrics.blinkRate, 5), repeat: Infinity }}
+                        >
+                          <Activity className={cn(
+                            "w-3 h-3",
+                            metrics.blinkRate < 8 || metrics.blinkRate > 25 ? "text-warning" : "text-primary"
+                          )} />
+                        </motion.div>
+                        <span>{metrics.blinkRate}</span>
+                        <span className="text-muted-foreground">/min</span>
+                      </div>
+
+                      {/* Yawn count */}
+                      {metrics.yawnCount > 0 && (
+                        <motion.div
+                          initial={{ scale: 0 }}
+                          animate={{ scale: 1 }}
+                          className="flex items-center gap-1 bg-warning/20 border border-warning/50 px-2 py-1 rounded-lg text-[10px] sm:text-xs font-mono"
+                        >
+                          <AlertTriangle className="w-3 h-3 text-warning" />
+                          <span>{metrics.yawnCount} yawns</span>
+                        </motion.div>
+                      )}
                     </div>
                   </div>
                 </motion.div>

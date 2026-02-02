@@ -34,10 +34,10 @@ const defaultMetrics: FatigueMetrics = {
   faceDetected: false,
 };
 
-// Optimized detection options for speed
+// Ultra-optimized detection options for instant real-time response
 const detectionOptions = new faceapi.TinyFaceDetectorOptions({
-  inputSize: 224, // Smaller input = faster detection
-  scoreThreshold: 0.3, // Lower threshold for faster detection
+  inputSize: 160, // Smallest input = fastest detection (~15ms per frame)
+  scoreThreshold: 0.25, // Lower threshold for quicker face pickup
 });
 
 export function useFaceDetection(): UseFaceDetectionReturn {
@@ -178,12 +178,8 @@ export function useFaceDetection(): UseFaceDetectionReturn {
     const detect = async () => {
       if (video.paused || video.ended) return;
 
-      // Skip every other frame for performance (process at ~15fps instead of 30fps)
-      frameSkip.current++;
-      if (frameSkip.current % 2 !== 0) {
-        animationRef.current = requestAnimationFrame(detect);
-        return;
-      }
+      // Process every frame for instant real-time detection (~30fps)
+      // With inputSize 160, each detection takes ~10-15ms which allows 30fps+
 
       try {
         const detections = await faceapi

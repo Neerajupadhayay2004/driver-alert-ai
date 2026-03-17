@@ -9,6 +9,7 @@ interface UseFaceDetectionReturn {
   metrics: FatigueMetrics;
   alertLevel: AlertLevel;
   history: FatigueHistory[];
+  confidence: number;
   startDetection: (video: HTMLVideoElement, canvas: HTMLCanvasElement) => void;
   stopDetection: () => void;
 }
@@ -34,11 +35,82 @@ const defaultMetrics: FatigueMetrics = {
   faceDetected: false,
 };
 
-// Ultra-optimized detection options for instant real-time response
+// Improved detection: higher input for accuracy, balanced threshold
 const detectionOptions = new faceapi.TinyFaceDetectorOptions({
-  inputSize: 160, // Smallest input = fastest detection (~15ms per frame)
-  scoreThreshold: 0.25, // Lower threshold for quicker face pickup
+  inputSize: 224, // Better accuracy than 160
+  scoreThreshold: 0.3,
 });
+
+// Exponential moving average for smoothing
+class EMAFilter {
+  private value: number;
+  private alpha: number;
+  private initialized = false;
+
+  constructor(alpha = 0.3) {
+    this.alpha = alpha;
+    this.value = 0;
+  }
+
+  update(raw: number): number {
+    if (!this.initialized) {
+      this.value = raw;
+      this.initialized = true;
+      return raw;
+    }
+    this.value = this.alpha * raw + (1 - this.alpha) * this.value;
+    return this.value;
+  }
+
+  get current() { return this.value; }
+  reset() { this.initialized = false; this.value = 0; }
+}
+
+// Adaptive EAR threshold with calibration
+class EARCalibrator {
+  private samples: number[] = [];
+  private calibrated = false;
+  private openThreshold = 0.22;
+  private closedThreshold = 0.18;
+  private readonly CALIBRATION_FRAMES = 30;
+
+  addSample(ear: number) {
+    if (this.calibrated) return;
+    this.samples.push(ear);
+    if (this.samples.length >= this.CALIBRATION_FRAMES) {
+      this.calibrate();
+    }
+  }
+
+  private calibrate() {
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    // Top 70% are "open" frames (assuming user starts with eyes open)
+    const openSamples = sorted.slice(Math.floor(sorted.length * 0.3));
+    const avgOpen = openSamples.reduce((a, b) => a + b, 0) / openSamples.length;
+    
+    this.openThreshold = avgOpen * 0.75; // 75% of average open EAR
+    this.closedThreshold = avgOpen * 0.6; // 60% of average open EAR
+    this.calibrated = true;
+    console.log(`[EAR] Calibrated: open=${this.openThreshold.toFixed(3)}, closed=${this.closedThreshold.toFixed(3)}`);
+  }
+
+  isEyeOpen(ear: number): boolean {
+    return ear > this.openThreshold;
+  }
+
+  isEyeClosed(ear: number): boolean {
+    return ear < this.closedThreshold;
+  }
+
+  get isCalibrated() { return this.calibrated; }
+  
+  reset() {
+    this.samples = [];
+    this.calibrated = false;
+    this.openThreshold = 0.22;
+    this.closedThreshold = 0.18;
+  }
+}
 
 export function useFaceDetection(): UseFaceDetectionReturn {
   const [isLoading, setIsLoading] = useState(!faceApiLoader.loaded);
@@ -47,6 +119,7 @@ export function useFaceDetection(): UseFaceDetectionReturn {
   const [metrics, setMetrics] = useState<FatigueMetrics>(defaultMetrics);
   const [alertLevel, setAlertLevel] = useState<AlertLevel>('alert');
   const [history, setHistory] = useState<FatigueHistory[]>([]);
+  const [confidence, setConfidence] = useState(0);
 
   const animationRef = useRef<number | null>(null);
   const eyeClosedFrames = useRef(0);
@@ -56,16 +129,32 @@ export function useFaceDetection(): UseFaceDetectionReturn {
   const lastEyeState = useRef(true);
   const headPoseHistory = useRef<{ pitch: number; timestamp: number }[]>([]);
   const lastHistoryUpdate = useRef(0);
-  const frameSkip = useRef(0);
+  
+  // Smoothing filters
+  const earFilter = useRef(new EMAFilter(0.4));
+  const pitchFilter = useRef(new EMAFilter(0.3));
+  const yawFilter = useRef(new EMAFilter(0.3));
+  const rollFilter = useRef(new EMAFilter(0.3));
+  const mouthFilter = useRef(new EMAFilter(0.35));
+  
+  // Adaptive calibration
+  const earCalibrator = useRef(new EARCalibrator());
+  
+  // Consecutive frame tracking for blink debouncing
+  const consecutiveClosedFrames = useRef(0);
+  const consecutiveOpenFrames = useRef(0);
+  const BLINK_MIN_CLOSED_FRAMES = 2; // Min frames for a blink
+  const BLINK_MAX_CLOSED_FRAMES = 15; // Max frames (longer = sleeping)
+  
+  // PERCLOS sliding window (last 30 seconds)
+  const perclosWindow = useRef<{ closed: boolean; timestamp: number }[]>([]);
 
-  // Subscribe to model loading state
   useEffect(() => {
     const unsubscribe = faceApiLoader.subscribe((loaded, loadError) => {
       setIsModelLoaded(loaded);
       setIsLoading(!loaded && !loadError);
       setError(loadError ?? null);
     });
-
     return unsubscribe;
   }, []);
 
@@ -73,13 +162,17 @@ export function useFaceDetection(): UseFaceDetectionReturn {
     const verticalA = Math.hypot(eye[1].x - eye[5].x, eye[1].y - eye[5].y);
     const verticalB = Math.hypot(eye[2].x - eye[4].x, eye[2].y - eye[4].y);
     const horizontal = Math.hypot(eye[0].x - eye[3].x, eye[0].y - eye[3].y);
+    if (horizontal === 0) return 0;
     return (verticalA + verticalB) / (2.0 * horizontal);
   }, []);
 
   const calculateMouthOpenRatio = useCallback((mouth: faceapi.Point[]): number => {
-    const verticalDist = Math.hypot(mouth[13].x - mouth[19].x, mouth[13].y - mouth[19].y);
+    // Use multiple vertical measurements for accuracy
+    const v1 = Math.hypot(mouth[13].x - mouth[19].x, mouth[13].y - mouth[19].y);
+    const v2 = Math.hypot(mouth[14].x - mouth[18].x, mouth[14].y - mouth[18].y);
     const horizontalDist = Math.hypot(mouth[0].x - mouth[6].x, mouth[0].y - mouth[6].y);
-    return verticalDist / horizontalDist;
+    if (horizontalDist === 0) return 0;
+    return (v1 + v2) / (2 * horizontalDist);
   }, []);
 
   const calculateHeadPose = useCallback((landmarks: faceapi.FaceLandmarks68) => {
@@ -99,10 +192,13 @@ export function useFaceDetection(): UseFaceDetectionReturn {
     const leftEyeCenter = { x: (leftEye[0].x + leftEye[3].x) / 2, y: (leftEye[0].y + leftEye[3].y) / 2 };
     const rightEyeCenter = { x: (rightEye[0].x + rightEye[3].x) / 2, y: (rightEye[0].y + rightEye[3].y) / 2 };
     const eyeWidth = rightEyeCenter.x - leftEyeCenter.x;
+    if (eyeWidth === 0) return { pitch: 0, yaw: 0, roll: 0 };
+    
     const noseOffset = noseTip.x - eyeCenter.x;
     const yaw = (noseOffset / eyeWidth) * 60;
 
     const faceHeight = jaw[8].y - eyeCenter.y;
+    if (faceHeight === 0) return { pitch: 0, yaw: 0, roll: 0 };
     const noseHeight = noseTip.y - noseBase.y;
     const pitch = ((noseHeight / faceHeight) - 0.5) * 60;
 
@@ -110,16 +206,39 @@ export function useFaceDetection(): UseFaceDetectionReturn {
     const eyeDeltaX = rightEyeCenter.x - leftEyeCenter.x;
     const roll = Math.atan2(eyeDeltaY, eyeDeltaX) * (180 / Math.PI);
 
-    return { pitch, yaw, roll };
+    return {
+      pitch: pitchFilter.current.update(pitch),
+      yaw: yawFilter.current.update(yaw),
+      roll: rollFilter.current.update(roll),
+    };
   }, []);
 
   const determineAlertLevel = useCallback((currentMetrics: FatigueMetrics): AlertLevel => {
     const { perclos, blinkRate, yawnFrequency, noddingDetected } = currentMetrics;
-
-    if (perclos >= 70 || (noddingDetected && perclos >= 40)) return 'critical';
-    if (perclos >= 50 || yawnFrequency >= 5) return 'severe';
-    if (perclos >= 35 || yawnFrequency >= 3) return 'fatigued';
-    if (perclos >= 25 || blinkRate < 8 || blinkRate > 25) return 'drowsy';
+    
+    // Weighted scoring system for more accurate alerting
+    let score = 0;
+    
+    if (perclos >= 70) score += 5;
+    else if (perclos >= 50) score += 4;
+    else if (perclos >= 35) score += 3;
+    else if (perclos >= 25) score += 2;
+    else if (perclos >= 15) score += 1;
+    
+    if (blinkRate < 5) score += 3;
+    else if (blinkRate < 8 || blinkRate > 30) score += 2;
+    else if (blinkRate > 25) score += 1;
+    
+    if (yawnFrequency >= 5) score += 3;
+    else if (yawnFrequency >= 3) score += 2;
+    else if (yawnFrequency >= 1) score += 1;
+    
+    if (noddingDetected) score += 3;
+    
+    if (score >= 8) return 'critical';
+    if (score >= 6) return 'severe';
+    if (score >= 4) return 'fatigued';
+    if (score >= 2) return 'drowsy';
     return 'alert';
   }, []);
 
@@ -140,11 +259,12 @@ export function useFaceDetection(): UseFaceDetectionReturn {
     return 'normal';
   }, []);
 
-  const drawLandmarks = useCallback((ctx: CanvasRenderingContext2D, landmarks: faceapi.FaceLandmarks68) => {
-    ctx.strokeStyle = 'hsl(187, 92%, 50%)';
+  const drawLandmarks = useCallback((ctx: CanvasRenderingContext2D, landmarks: faceapi.FaceLandmarks68, detectionScore: number) => {
+    const hue = detectionScore > 0.7 ? 187 : detectionScore > 0.4 ? 38 : 0;
+    ctx.strokeStyle = `hsl(${hue}, 92%, 50%)`;
     ctx.lineWidth = 2;
-    ctx.shadowColor = 'hsl(187, 92%, 50%)';
-    ctx.shadowBlur = 8;
+    ctx.shadowColor = `hsl(${hue}, 92%, 50%)`;
+    ctx.shadowBlur = 10;
 
     // Draw face outline
     const jaw = landmarks.getJawOutline();
@@ -155,7 +275,7 @@ export function useFaceDetection(): UseFaceDetectionReturn {
     });
     ctx.stroke();
 
-    // Draw eyes with glow
+    // Draw eyes
     [landmarks.getLeftEye(), landmarks.getRightEye()].forEach((eye) => {
       ctx.beginPath();
       eye.forEach((point, i) => {
@@ -163,6 +283,39 @@ export function useFaceDetection(): UseFaceDetectionReturn {
         else ctx.lineTo(point.x, point.y);
       });
       ctx.closePath();
+      ctx.stroke();
+    });
+
+    // Draw nose
+    ctx.strokeStyle = `hsl(${hue}, 60%, 40%)`;
+    ctx.lineWidth = 1;
+    const nose = landmarks.getNose();
+    ctx.beginPath();
+    nose.forEach((point, i) => {
+      if (i === 0) ctx.moveTo(point.x, point.y);
+      else ctx.lineTo(point.x, point.y);
+    });
+    ctx.stroke();
+
+    // Draw mouth
+    ctx.strokeStyle = `hsl(${hue}, 80%, 45%)`;
+    const mouth = landmarks.getMouth();
+    ctx.beginPath();
+    mouth.forEach((point, i) => {
+      if (i === 0) ctx.moveTo(point.x, point.y);
+      else ctx.lineTo(point.x, point.y);
+    });
+    ctx.closePath();
+    ctx.stroke();
+
+    // Draw eyebrows
+    ctx.strokeStyle = `hsl(${hue}, 50%, 35%)`;
+    [landmarks.getLeftEyeBrow(), landmarks.getRightEyeBrow()].forEach((brow) => {
+      ctx.beginPath();
+      brow.forEach((point, i) => {
+        if (i === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      });
       ctx.stroke();
     });
 
@@ -178,9 +331,6 @@ export function useFaceDetection(): UseFaceDetectionReturn {
     const detect = async () => {
       if (video.paused || video.ended) return;
 
-      // Process every frame for instant real-time detection (~30fps)
-      // With inputSize 160, each detection takes ~10-15ms which allows 30fps+
-
       try {
         const detections = await faceapi
           .detectSingleFace(video, detectionOptions)
@@ -191,44 +341,77 @@ export function useFaceDetection(): UseFaceDetectionReturn {
 
         if (detections) {
           const landmarks = detections.landmarks;
+          const detectionScore = detections.detection.score;
           const leftEye = landmarks.getLeftEye();
           const rightEye = landmarks.getRightEye();
           const mouth = landmarks.getMouth();
 
-          // Draw landmarks
-          drawLandmarks(ctx, landmarks);
+          // Draw all landmarks with confidence-based coloring
+          drawLandmarks(ctx, landmarks, detectionScore);
 
-          // Calculate metrics
+          // Calculate EAR with smoothing
           const leftEAR = calculateEAR(leftEye);
           const rightEAR = calculateEAR(rightEye);
-          const avgEAR = (leftEAR + rightEAR) / 2;
-          const eyesOpen = avgEAR > 0.2;
+          const rawEAR = (leftEAR + rightEAR) / 2;
+          const smoothedEAR = earFilter.current.update(rawEAR);
+          
+          // Feed calibrator
+          earCalibrator.current.addSample(rawEAR);
+          
+          // Use adaptive threshold if calibrated, else default
+          const eyesOpen = earCalibrator.current.isCalibrated 
+            ? earCalibrator.current.isEyeOpen(smoothedEAR)
+            : smoothedEAR > 0.2;
 
-          const mouthOpenRatio = calculateMouthOpenRatio(mouth);
-          const isYawning = mouthOpenRatio > 0.5;
+          // Blink debouncing - require consecutive frames
+          if (!eyesOpen) {
+            consecutiveClosedFrames.current++;
+            consecutiveOpenFrames.current = 0;
+          } else {
+            consecutiveOpenFrames.current++;
+            consecutiveClosedFrames.current = 0;
+          }
 
+          // Only count as "closed" if consistently closed
+          const isReallyClosed = consecutiveClosedFrames.current >= BLINK_MIN_CLOSED_FRAMES;
+          const isReallyOpen = consecutiveOpenFrames.current >= 2;
+          const effectiveEyeState = isReallyClosed ? false : isReallyOpen ? true : lastEyeState.current;
+
+          // Mouth with smoothing
+          const rawMouthRatio = calculateMouthOpenRatio(mouth);
+          const smoothedMouthRatio = mouthFilter.current.update(rawMouthRatio);
+          const isYawning = smoothedMouthRatio > 0.45;
+
+          // Head pose (already smoothed in calculateHeadPose)
           const headPose = calculateHeadPose(landmarks);
 
-          // Track PERCLOS
-          totalFrames.current++;
-          if (!eyesOpen) {
-            eyeClosedFrames.current++;
-          }
-          const perclos = (eyeClosedFrames.current / totalFrames.current) * 100;
-
-          // Track blinks
+          // PERCLOS with sliding window (30 seconds)
           const now = Date.now();
-          if (lastEyeState.current && !eyesOpen) {
+          perclosWindow.current.push({ closed: !effectiveEyeState, timestamp: now });
+          perclosWindow.current = perclosWindow.current.filter(p => now - p.timestamp < 30000);
+          
+          const closedCount = perclosWindow.current.filter(p => p.closed).length;
+          const perclos = perclosWindow.current.length > 0 
+            ? (closedCount / perclosWindow.current.length) * 100 
+            : 0;
+
+          // Track PERCLOS legacy for total session
+          totalFrames.current++;
+          if (!effectiveEyeState) eyeClosedFrames.current++;
+
+          // Track blinks with debouncing
+          if (lastEyeState.current && !effectiveEyeState && 
+              consecutiveClosedFrames.current === BLINK_MIN_CLOSED_FRAMES) {
             blinkTimestamps.current.push(now);
             blinkTimestamps.current = blinkTimestamps.current.filter((t) => now - t < 60000);
           }
-          lastEyeState.current = eyesOpen;
+          lastEyeState.current = effectiveEyeState;
           const blinkRate = blinkTimestamps.current.length;
 
-          // Track yawns
+          // Track yawns with better debouncing
           if (isYawning) {
             const lastYawn = yawnTimestamps.current[yawnTimestamps.current.length - 1];
-            if (!lastYawn || now - lastYawn > 5000) {
+            if (!lastYawn || now - lastYawn > 4000) {
               yawnTimestamps.current.push(now);
             }
           }
@@ -244,7 +427,7 @@ export function useFaceDetection(): UseFaceDetectionReturn {
             const pitches = headPoseHistory.current.map((h) => h.pitch);
             const maxPitch = Math.max(...pitches);
             const minPitch = Math.min(...pitches);
-            noddingDetected = maxPitch - minPitch > 15;
+            noddingDetected = maxPitch - minPitch > 12;
           }
 
           const newMetrics: FatigueMetrics = {
@@ -253,19 +436,20 @@ export function useFaceDetection(): UseFaceDetectionReturn {
             blinkPattern: determineBlinkPattern(blinkRate, blinkTimestamps.current),
             yawnCount: yawnTimestamps.current.length,
             yawnFrequency,
-            mouthOpenRatio: Math.round(mouthOpenRatio * 100) / 100,
+            mouthOpenRatio: Math.round(smoothedMouthRatio * 100) / 100,
             headPose: {
               pitch: Math.round(headPose.pitch),
               yaw: Math.round(headPose.yaw),
               roll: Math.round(headPose.roll),
             },
             noddingDetected,
-            eyesOpen,
+            eyesOpen: effectiveEyeState,
             faceDetected: true,
           };
 
           setMetrics(newMetrics);
           setAlertLevel(determineAlertLevel(newMetrics));
+          setConfidence(Math.round(detectionScore * 100));
 
           // Add to history every 5 seconds
           if (now - lastHistoryUpdate.current > 5000) {
@@ -282,6 +466,7 @@ export function useFaceDetection(): UseFaceDetectionReturn {
           }
         } else {
           setMetrics((prev) => ({ ...prev, faceDetected: false }));
+          setConfidence(0);
         }
       } catch (err) {
         console.error('Detection error:', err);
@@ -303,7 +488,15 @@ export function useFaceDetection(): UseFaceDetectionReturn {
     blinkTimestamps.current = [];
     yawnTimestamps.current = [];
     headPoseHistory.current = [];
-    frameSkip.current = 0;
+    perclosWindow.current = [];
+    consecutiveClosedFrames.current = 0;
+    consecutiveOpenFrames.current = 0;
+    earFilter.current.reset();
+    pitchFilter.current.reset();
+    yawFilter.current.reset();
+    rollFilter.current.reset();
+    mouthFilter.current.reset();
+    earCalibrator.current.reset();
   }, []);
 
   return {
@@ -313,6 +506,7 @@ export function useFaceDetection(): UseFaceDetectionReturn {
     metrics,
     alertLevel,
     history,
+    confidence,
     startDetection,
     stopDetection,
   };
